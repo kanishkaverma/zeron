@@ -576,9 +576,9 @@ impl Shell {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    fn test_shell(
+    pub(crate) fn test_shell(
         cx: &mut gpui::TestAppContext,
         path: &std::path::Path,
     ) -> gpui::WindowHandle<super::Shell> {

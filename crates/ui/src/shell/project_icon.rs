@@ -383,6 +383,46 @@ mod tests {
         std::fs::write(temp.path().join("public/apple-touch-icon.png"), b"invalid").unwrap();
         assert!(load_local_icon(temp.path()).is_none());
     }
+    #[gpui::test]
+    fn sidebar_project_icon_is_absent_without_a_space(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = crate::shell::sidebar_sections::tests::test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.local_device_id = Some("local".into());
+                    state.chats = vec![
+                        serde_json::from_value(serde_json::json!({
+                            "id":"homeless","title":"homeless","deviceId":"local",
+                            "archived":false,"createdAt":"2026-09-20T00:00:00Z"
+                        }))
+                        .unwrap(),
+                        serde_json::from_value(serde_json::json!({
+                            "id":"in-space","title":"in-space","deviceId":"local","spaceId":"s1",
+                            "archived":false,"createdAt":"2026-09-20T00:00:00Z"
+                        }))
+                        .unwrap(),
+                    ];
+                    state.spaces = vec![
+                        serde_json::from_value(serde_json::json!({
+                            "id":"s1","deviceId":"local","path":"/tmp/widgets",
+                            "createdAt":"2026-09-20T00:00:00Z"
+                        }))
+                        .unwrap(),
+                    ];
+                });
+                assert!(
+                    shell.render_project_icon("homeless", 16.0, false, cx).is_none(),
+                    "A chat with no space must not render a Home monogram"
+                );
+                assert!(
+                    shell.render_project_icon("in-space", 16.0, false, cx).is_some(),
+                    "A chat in a space keeps its project badge"
+                );
+            })
+            .unwrap();
+    }
+
     #[test]
     fn sidebar_project_icons_support_svg_and_ico() {
         let temp = tempfile::tempdir().unwrap();
