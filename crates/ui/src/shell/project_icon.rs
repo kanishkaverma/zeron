@@ -285,22 +285,20 @@ impl Shell {
         size: f32,
         selected: bool,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Option<AnyElement> {
         let state = self.state.read(cx);
         let chat = state.chats.iter().find(|chat| chat.id == chat_id);
-        let space = chat.and_then(|chat| state.space_for_chat(chat));
-        let name = space
-            .map(|space| space.display_name().to_string())
-            .unwrap_or_else(|| "Home".into());
+        // A chat with no space has no project to show. Skip the badge instead
+        // of rendering a "Home" monogram on every one of these rows.
+        let space = chat.and_then(|chat| state.space_for_chat(chat))?;
+        let name = space.display_name().to_string();
         // Same fallback as the row's "@ device" fragment.
         let device = chat
             .and_then(|chat| state.device_name(&chat.device_id))
             .unwrap_or("Unknown device")
             .to_string();
-        let seed = space
-            .map(|space| space.path.clone())
-            .unwrap_or_else(|| "home".into());
-        let context = space.map(|space| FilesRequestContext {
+        let seed = space.path.clone();
+        let context = FilesRequestContext {
             target: zeron_proto::WorkspaceTarget {
                 chat_id: None,
                 space_id: Some(space.id.clone()),
@@ -310,15 +308,6 @@ impl Shell {
                 .then(|| space.device_id.clone()),
             cwd: space.path.clone(),
             checkout_id: space.checkout_id.clone(),
-        });
-        let Some(context) = context else {
-            return project_icon_frame(
-                chat_id,
-                &name,
-                &device,
-                size,
-                monogram(&name, &seed, selected, Theme::of(cx)),
-            );
         };
         let key = format!(
             "{:?}:{:?}:{}:{:?}:{}",
@@ -331,13 +320,13 @@ impl Shell {
         let engine = state.engine().cloned();
         // Don't cache a remote miss before a connection exists.
         if context.target_device_id.is_some() && engine.is_none() {
-            return project_icon_frame(
+            return Some(project_icon_frame(
                 chat_id,
                 &name,
                 &device,
                 size,
                 monogram(&name, &seed, selected, Theme::of(cx)),
-            );
+            ));
         }
         let mut cache = self.project_icons.borrow_mut();
         cache.retain(|_, entity| entity.read(cx).refreshed.elapsed() < Duration::from_secs(300));
@@ -355,15 +344,15 @@ impl Shell {
             .clone();
         drop(cache);
         if entity.read(cx).media.is_none() {
-            return project_icon_frame(
+            return Some(project_icon_frame(
                 chat_id,
                 &name,
                 &device,
                 size,
                 monogram(&name, &seed, selected, Theme::of(cx)),
-            );
+            ));
         }
-        project_icon_frame(chat_id, &name, &device, size, entity)
+        Some(project_icon_frame(chat_id, &name, &device, size, entity))
     }
 }
 
