@@ -1,0 +1,136 @@
+name: fork release
+
+# Rebuilds the latest zeronsh/zeron release with the PATCH_BRANCH commits
+# applied and publishes it here as the latest release. Those builds point the
+# in-app updater at this repo, so installed copies keep getting upstream
+# releases without losing the patch. Once upstream ships the patch itself, the
+# build is stock and points back at the official feed.
+
+on:
+  schedule:
+    - cron: "23 7 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even if this upstream version is already published
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-release
+
+env:
+  UPSTREAM: zeronsh/zeron
+  PATCH_BRANCH: transcript-search
+  PATCH_MARKER: crates/engine/src/transcript_search.rs
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      build: ${{ steps.plan.outputs.build }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          tag=$(gh api "repos/$UPSTREAM/releases/latest" -q .tag_name)
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          if [ "$FORCE" != true ] && gh release view "ts-${tag#v}" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "ts-${tag#v} already published"
+            echo "build=false" >>"$GITHUB_OUTPUT"
+          else
+            echo "build=true" >>"$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: macos-latest
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+      FEED: https://github.com/${{ github.repository }}/releases/latest/download
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PATCH_BRANCH }}
+          fetch-depth: 0
+
+      - name: apply the patch to the upstream release
+        id: src
+        run: |
+          git config user.name "fork-release"
+          git config user.email "fork-release@users.noreply.github.com"
+          patch=$(git rev-parse HEAD)
+          git fetch --no-tags "https://github.com/$UPSTREAM.git" \
+            "+refs/tags/$TAG:refs/tags/$TAG" "+refs/heads/main:refs/remotes/upstream/main"
+          git checkout -q --detach "$TAG"
+          if git cat-file -e "$TAG:$PATCH_MARKER" 2>/dev/null; then
+            echo "upstream $TAG already contains the patch; building it stock"
+            echo "patched=false" >>"$GITHUB_OUTPUT"
+          else
+            git cherry-pick "upstream/main..$patch"
+            echo "patched=true" >>"$GITHUB_OUTPUT"
+          fi
+          echo "patch=$patch" >>"$GITHUB_OUTPUT"
+          version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          [ "v$version" = "$TAG" ] || { echo "Cargo.toml $version does not match $TAG"; exit 1; }
+          echo "VERSION=$version" >>"$GITHUB_ENV"
+
+      - name: point the updater at this fork
+        if: steps.src.outputs.patched == 'true'
+        run: |
+          plutil -insert LSEnvironment -json "{\"ZERON_RELEASES_URL\":\"$FEED\"}" dist/macos/Info.plist
+
+      - name: rust toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+
+      - name: package
+        run: scripts/package-macos.sh
+
+      - name: verify the bundle
+        env:
+          PATCHED: ${{ steps.src.outputs.patched }}
+        run: |
+          app=target/package/Zeron.app
+          [ "$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")" = "$VERSION" ]
+          if [ "$PATCHED" = true ]; then
+            [ "$(plutil -extract LSEnvironment.ZERON_RELEASES_URL raw "$app/Contents/Info.plist")" = "$FEED" ]
+            strings "$app/Contents/MacOS/zeron" | grep -q SearchTranscriptsRequest
+          else
+            ! plutil -extract LSEnvironment.ZERON_RELEASES_URL raw "$app/Contents/Info.plist" 2>/dev/null
+          fi
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PATCHED: ${{ steps.src.outputs.patched }}
+          PATCH: ${{ steps.src.outputs.patch }}
+        run: |
+          cd target/package
+          app="zeron-$VERSION-macos-arm64-app.tar.gz"
+          dmg="zeron-$VERSION-macos-arm64.dmg"
+          jq -n --arg v "$VERSION" --arg n "$app" --arg s "$(shasum -a 256 "$app" | cut -d' ' -f1)" \
+            '{version: $v, files: {($n): {sha256: $s}}}' >manifest.json
+          release="ts-$VERSION"
+          gh release delete "$release" -R "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
+          git tag -f "$release"
+          git push -f origin "refs/tags/$release"
+          if [ "$PATCHED" = true ]; then
+            what="Upstream [$TAG](https://github.com/$UPSTREAM/releases/tag/$TAG) plus \`$PATCH_BRANCH\` at ${PATCH:0:8}. The in-app updater follows this repo's releases."
+          else
+            what="Upstream [$TAG](https://github.com/$UPSTREAM/releases/tag/$TAG) unmodified; it already includes the patch. Installing it returns the updater to the official feed."
+          fi
+          notes="$what
+
+          Apple silicon, ad-hoc signed, not notarized. After a manual install from the dmg run:
+
+              xattr -dr com.apple.quarantine /Applications/Zeron.app"
+          gh release create "$release" "$dmg" "$app" manifest.json -R "$GITHUB_REPOSITORY" \
+            --verify-tag --latest --title "Zeron $VERSION ($PATCH_BRANCH)" --notes "$notes"
