@@ -4484,6 +4484,7 @@ impl Shell {
                     if is_moving { None } else { drag },
                     jump_label,
                     None,
+                    None,
                     theme,
                     cx,
                 );
@@ -4943,6 +4944,7 @@ impl Shell {
                         is_selected,
                         true,
                         false,
+                        None,
                         None,
                         None,
                         None,
